@@ -48,8 +48,12 @@ e versões antigas dos dois lados continuam existindo por um tempo.
   Em cada par, **quem tem o id menor (comparação de string do UUID) manda o offer**. Sinais
   `offer`/`answer`/`ice` iguais aos da transmissão.
 - Presence da voz publica `{role: "voice", name, muted, sharing}` (atualizado com
-  `Room.update_meta`); é daí que sai a lista de pessoas com avatar. Quem não manda `name`
-  (o app web, por enquanto) aparece como "Navegador". O nome fica em `settings.json`
+  `Room.update_meta`); é daí que sai a lista de pessoas com avatar (cor = md5(nome) % 8,
+  igual no web). Quem não manda `name` (versões antigas) aparece como "Navegador".
+- Atualizar a presence gera "leave" da entrada antiga + "join" da nova: só trate como saída
+  quando não sobra nenhuma entrada (`current`/`currentPresences` vazio), senão a voz cai a
+  cada mute.
+- No web a sala é `/r/<código>` e qualquer um cria salas novas; o app usa a sala fixa `ROOM_CODE`. O nome fica em `settings.json`
   (`app/settings.py`), padrão = usuário do Windows.
 - aiortc **não faz trickle ICE**: candidatos do Python vão dentro do SDP; os do navegador
   chegam como `ice` e entram por `add_ice`. ICE que chega antes do offer/answer é enfileirado.
