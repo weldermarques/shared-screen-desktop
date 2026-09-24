@@ -70,7 +70,10 @@ class HostPage(QWidget):
         self.link = QLineEdit(f"{config.WEB_URL}/r/{self.code}")
         self.link.setReadOnly(True)
         link_row.addWidget(self.link)
-        self.copy_btn = button("Copiar", "secondary")
+        self.copy_btn = button("📋", "secondary")
+        self.copy_btn.setFixedWidth(44)
+        self.copy_btn.setStyleSheet("padding: 6px 0; font-size: 12pt;")
+        self.copy_btn.setToolTip("Copiar link")
         self.copy_btn.clicked.connect(self._copy)
         link_row.addWidget(self.copy_btn)
         col.addLayout(link_row)
@@ -147,8 +150,13 @@ class HostPage(QWidget):
 
     def _copy(self) -> None:
         QGuiApplication.clipboard().setText(self.link.text())
-        self.copy_btn.setText("Copiado!")
-        QTimer.singleShot(1500, lambda: self.copy_btn.setText("Copiar"))
+        self.copy_btn.setText("✅")
+        self.copy_btn.setToolTip("Copiado!")
+        QTimer.singleShot(1500, self._reset_copy)
+
+    def _reset_copy(self) -> None:
+        self.copy_btn.setText("📋")
+        self.copy_btn.setToolTip("Copiar link")
 
     def _back(self) -> None:
         async def go() -> None:
