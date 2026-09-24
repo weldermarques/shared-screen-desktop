@@ -5,13 +5,11 @@ import logging
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
+from PySide6.QtWidgets import QApplication, QMainWindow
 
 from .. import APP_NAME, __version__, updater
-from .home import HomePage
-from .host import HostPage
+from .room import RoomPage
 from .update_dialog import UpdateDialog
-from .viewer import ViewerPage
 
 log = logging.getLogger(__name__)
 
@@ -25,12 +23,12 @@ class MainWindow(QMainWindow):
         self.resize(1100, 700)
         self.setMinimumSize(760, 520)
 
-        self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
-        self.page = None
+        # Sala única: o app abre direto nela.
+        self.page = RoomPage(on_fullscreen=self.toggle_fullscreen)
+        self.setCentralWidget(self.page)
         self._closing = False
         self._update_dialog: UpdateDialog | None = None
-        self.show_home()
+        asyncio.ensure_future(self.page.start())
 
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self.toggle_fullscreen)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.exit_fullscreen)
@@ -41,53 +39,27 @@ class MainWindow(QMainWindow):
         if updater.update_checks_enabled():
             self._update_timer.start(UPDATE_CHECK_INTERVAL_MS)
 
-    # --- navegação ---
-
-    def _set_page(self, page) -> None:
-        old = self.page
-        self.page = page
-        self.stack.addWidget(page)
-        self.stack.setCurrentWidget(page)
-        if old is not None:
-            self.stack.removeWidget(old)
-            old.deleteLater()
-
-    def show_home(self) -> None:
-        self.exit_fullscreen()
-        self._set_page(HomePage(on_host=self.show_host, on_watch=self.show_viewer))
-
-    def show_host(self) -> None:
-        self._set_page(HostPage(on_back=self.show_home))
-
-    def show_viewer(self, code: str) -> None:
-        page = ViewerPage(code, on_back=self.show_home, on_fullscreen=self.toggle_fullscreen)
-        self._set_page(page)
-        asyncio.ensure_future(page.start())
-
     # --- tela cheia ---
 
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():
             self.exit_fullscreen()
-        elif isinstance(self.page, ViewerPage):
+        else:
             self.page.set_fullscreen_ui(True)
             self.showFullScreen()
 
     def exit_fullscreen(self) -> None:
         if self.isFullScreen():
             self.showNormal()
-        if isinstance(self.page, ViewerPage):
-            self.page.set_fullscreen_ui(False)
+        self.page.set_fullscreen_ui(False)
 
     # --- atualização / encerramento ---
 
     async def _stop_page(self) -> None:
-        page = self.page
-        if isinstance(page, (HostPage, ViewerPage)):
-            try:
-                await (page.leave() if isinstance(page, HostPage) else page.stop())
-            except Exception:  # noqa: BLE001
-                log.exception("erro ao encerrar sessão")
+        try:
+            await self.page.leave()
+        except Exception:  # noqa: BLE001
+            log.exception("erro ao sair da sala")
 
     async def _periodic_update_check(self) -> None:
         if self._update_dialog is not None:
@@ -112,7 +84,7 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         event.ignore()
-        if isinstance(self.page, HostPage) and not self.page.confirm_leave():
+        if not self.page.confirm_leave():
             return
         self._closing = True
 

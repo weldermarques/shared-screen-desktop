@@ -214,8 +214,6 @@ class PcmTrack(MediaStreamTrack):
         self._max_bytes = int(rate * 0.25) * channels * 2  # até 250 ms de atraso
         self._pts = 0
         self._start: float | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._data = asyncio.Event()
 
     def _push(self, data: bytes) -> None:
         with self._buf_lock:
@@ -223,27 +221,20 @@ class PcmTrack(MediaStreamTrack):
             overflow = len(self._buf) - self._max_bytes
             if overflow > 0:
                 del self._buf[:overflow]
-        loop = self._loop
-        if self._device_clock and loop is not None:
-            try:
-                loop.call_soon_threadsafe(self._data.set)
-            except RuntimeError:  # loop já fechado
-                pass
 
     async def _wait_device(self, need: int) -> None:
-        self._loop = asyncio.get_running_loop()
+        # Espera por sondagem curta: sem Event/wait_for, que se perdem no loop aninhado do qasync.
+        deadline = time.monotonic() + 0.5
         while self.readyState == "live":
-            self._data.clear()
             with self._buf_lock:
                 if len(self._buf) >= need:
                     # Atraso acumulado (ex.: ninguém consumia ainda) vira atraso fixo: descarta.
                     if len(self._buf) > need * 3:
                         del self._buf[: len(self._buf) - need]
                     return
-            try:
-                await asyncio.wait_for(self._data.wait(), 0.5)
-            except asyncio.TimeoutError:
+            if time.monotonic() > deadline:
                 return  # dispositivo parado: manda silêncio para não travar a conexão
+            await asyncio.sleep(0.005)
 
     async def recv(self) -> av.AudioFrame:
         if self.readyState != "live":
@@ -341,6 +332,31 @@ class ProcessAudioTrack(PcmTrack):
         self._capture.stop()
 
 
+class LevelMeter:
+    """Diz se há som (alguém falando) olhando o volume RMS dos últimos blocos de áudio."""
+
+    THRESHOLD = 500  # RMS mínimo em int16 (~ -36 dBFS)
+    NOISE_FACTOR = 4  # e bem acima do ruído de fundo (ventilador, chiado do fone)
+    HOLD = 0.3  # s aceso depois do último bloco alto, para não piscar entre as palavras
+
+    def __init__(self) -> None:
+        self._last_loud = 0.0
+        self._floor = float(self.THRESHOLD)
+
+    def update(self, pcm: np.ndarray) -> None:
+        if not pcm.size:
+            return
+        rms = float(np.sqrt(np.mean(pcm.astype(np.float32) ** 2)))
+        # Piso de ruído: desce na hora, sobe devagar (fala não "vira" ruído de fundo).
+        self._floor = rms if rms < self._floor else self._floor + (rms - self._floor) * 0.002
+        if rms > max(self.THRESHOLD, self._floor * self.NOISE_FACTOR):
+            self._last_loud = time.monotonic()
+
+    @property
+    def active(self) -> bool:
+        return time.monotonic() - self._last_loud < self.HOLD
+
+
 class MicrophoneTrack(PcmTrack):
     """Microfone padrão do Windows (voz da sala)."""
 
@@ -348,12 +364,19 @@ class MicrophoneTrack(PcmTrack):
         import sounddevice as sd
 
         super().__init__(48000, 1, device_clock=True)
+        self.meter = LevelMeter()
+
+        def callback(data, frames, t, status) -> None:
+            chunk = bytes(data)
+            self.meter.update(np.frombuffer(chunk, dtype=np.int16))
+            self._push(chunk)
+
         self._stream = sd.RawInputStream(
             samplerate=self.rate,
             channels=1,
             dtype="int16",
             blocksize=self._samples,
-            callback=lambda data, frames, t, status: self._push(bytes(data)),
+            callback=callback,
         )
         self._stream.start()
         log.info("microfone aberto: %s", sd.query_devices(kind="input")["name"])
@@ -413,10 +436,12 @@ class AudioPlayer:
         )
         self._stream.start()
         self._resampler = av.AudioResampler(format="s16", layout="stereo", rate=self.RATE)
+        self.meter = LevelMeter()
 
     def push(self, frame: av.AudioFrame) -> None:
         for out in self._resampler.resample(frame):
             pcm = out.to_ndarray().reshape(-1, self.CHANNELS)
+            self.meter.update(pcm)
             with self._lock:
                 self._chunks.append(pcm)
                 self._pending += len(pcm)

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-KEYS = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "TURN_URL", "TURN_USERNAME", "TURN_CREDENTIAL", "WEB_URL", "GITHUB_REPO"]
+KEYS = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "TURN_URL", "TURN_USERNAME", "TURN_CREDENTIAL", "WEB_URL", "GITHUB_REPO", "ROOM_CODE"]
 
 
 def read_env_file() -> dict[str, str]:

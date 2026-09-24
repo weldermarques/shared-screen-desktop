@@ -18,7 +18,7 @@ from aiortc.contrib.media import MediaRelay
 from aiortc.mediastreams import MediaStreamError
 
 from .media import AudioPlayer, MicrophoneTrack
-from .rtc import _sdp, add_ice, rtc_config
+from .rtc import _sdp, add_ice, close_pc, rtc_config
 from .signaling import Room, Signal
 
 log = logging.getLogger(__name__)
@@ -27,11 +27,15 @@ RECONNECT_DELAY = 2
 
 
 class VoiceSession:
-    def __init__(self, code: str, on_change: Callable[[int, int], None]) -> None:
-        """``on_change(conectados, pessoas_na_voz)`` — contagens sem incluir você."""
+    def __init__(self, code: str, on_change: Callable[[int, int], None], name: str = "") -> None:
+        """``on_change(conectados, pessoas_na_voz)`` — contagens sem incluir você.
+        Também é chamado quando alguém muda nome/mic/compartilhamento (ver ``people()``)."""
         self.code = code
         self.my_id = str(uuid.uuid4())
         self._on_change = on_change
+        # Publicado na presence do canal de voz para a lista de pessoas.
+        self.meta: dict = {"name": name, "muted": False, "sharing": False}
+        self._people: dict[str, dict] = {}
         self.mic: MicrophoneTrack | None = None
         self.mic_muted = False
         self.volume = 1.0
@@ -57,6 +61,7 @@ class VoiceSession:
                 on_peers=self._handle_peers,
                 on_peer_leave=lambda pid: asyncio.ensure_future(self._close_peer(pid)),
                 topic="voice",
+                meta=self.meta,
             )
             await self._room.join()
         except Exception:
@@ -78,6 +83,42 @@ class VoiceSession:
         self.mic_muted = muted
         if self.mic:
             self.mic.muted = muted
+        self._publish(muted=muted)
+
+    def set_sharing(self, sharing: bool) -> None:
+        self._publish(sharing=sharing)
+
+    def set_name(self, name: str) -> None:
+        self._publish(name=name)
+
+    def speaking(self) -> set[str]:
+        """Ids de quem está falando agora (você, pelo microfone; os outros, pelo áudio recebido)."""
+        ids = {pid for pid, player in self._players.items() if player.meter.active}
+        if self.mic and not self.mic_muted and self.mic.meter.active:
+            ids.add(self.my_id)
+        return ids
+
+    def people(self) -> list[dict]:
+        """Você primeiro, depois os outros por nome: {id, name, muted, sharing, me, connected}."""
+        me = {"id": self.my_id, **self.meta, "me": True, "connected": True}
+        others = [
+            {
+                "id": pid,
+                "name": meta.get("name") or "Navegador",
+                "muted": bool(meta.get("muted")),
+                "sharing": bool(meta.get("sharing")),
+                "me": False,
+                "connected": pid in self._peers and self._peers[pid].connectionState == "connected",
+            }
+            for pid, meta in self._people.items()
+        ]
+        return [me, *sorted(others, key=lambda p: p["name"].lower())]
+
+    def _publish(self, **changes) -> None:
+        self.meta.update(changes)
+        if self._room and not self._closed:
+            self._emit()
+            asyncio.ensure_future(self._room.update_meta(**changes))
 
     def set_volume(self, volume: float, muted: bool) -> None:
         self.volume, self.muted = volume, muted
@@ -92,6 +133,7 @@ class VoiceSession:
 
     def _handle_peers(self, peers: list[dict]) -> None:
         self._present = {p["id"] for p in peers}
+        self._people = {p["id"]: p.get("meta", {}) for p in peers}
         for pid in list(self._peers):
             if pid not in self._present:
                 asyncio.ensure_future(self._close_peer(pid))
@@ -110,7 +152,7 @@ class VoiceSession:
         if player:
             player.close()
         if pc:
-            await pc.close()
+            await close_pc(pc)
         self._emit()
 
     def _new_peer(self, pid: str) -> RTCPeerConnection:

@@ -41,6 +41,9 @@ TURN_URL = _get("TURN_URL")
 TURN_USERNAME = _get("TURN_USERNAME")
 TURN_CREDENTIAL = _get("TURN_CREDENTIAL")
 
+# Sala única e permanente: todo mundo que abre o app entra nela.
+ROOM_CODE = _get("ROOM_CODE", "SALA").upper()
+
 WEB_URL = _get("WEB_URL", "https://shared-screen-seven.vercel.app").rstrip("/")
 GITHUB_REPO = _get("GITHUB_REPO", "weldermarques/shared-screen-desktop")
 

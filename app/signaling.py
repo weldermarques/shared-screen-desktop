@@ -28,9 +28,12 @@ class Room:
         on_peers: Callable[[list[dict[str, str]]], None] | None = None,
         on_peer_leave: Callable[[str], None] | None = None,
         topic: str = "screen",
+        meta: dict[str, Any] | None = None,
     ) -> None:
+        """``meta``: dados extras publicados na presence (ex.: nome na voz)."""
         self.code = code
         self.topic = topic
+        self.meta = dict(meta or {})
         self.peer_id = peer_id
         self.role = role
         self._on_signal = on_signal
@@ -72,7 +75,13 @@ class Room:
 
         await channel.subscribe(on_status)
         await asyncio.wait_for(subscribed, timeout)
-        await channel.track({"role": self.role})
+        await channel.track({"role": self.role, **self.meta})
+
+    async def update_meta(self, **changes: Any) -> None:
+        """Atualiza os dados publicados na presence (todos recebem um novo "sync")."""
+        self.meta.update(changes)
+        if self._channel is not None:
+            await self._channel.track({"role": self.role, **self.meta})
 
     async def send(self, signal: Signal) -> None:
         if self._channel is not None:
@@ -115,7 +124,12 @@ class Room:
             return
         state = self._channel.presence_state()
         peers = [
-            {"id": key, "role": (metas[0].get("role") if metas else None) or "viewer"}
+            {
+                "id": key,
+                "role": (metas[0].get("role") if metas else None) or "viewer",
+                # Depois de um update_meta pode haver mais de uma entrada: a última é a atual.
+                "meta": dict(metas[-1]) if metas else {},
+            }
             for key, metas in state.items()
             if key != self.peer_id
         ]

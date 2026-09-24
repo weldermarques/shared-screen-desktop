@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 import uuid
 from typing import Callable
 
@@ -63,6 +64,21 @@ async def add_ice(pc: RTCPeerConnection, init: dict) -> None:
         log.debug("candidato ICE ignorado: %s", raw, exc_info=True)
 
 
+async def close_pc(pc: RTCPeerConnection, timeout: float = 2) -> None:
+    """Fecha a conexão sem travar a interface.
+
+    No loop do qasync (Windows), o fechamento do socket UDP do aioice às vezes nunca
+    avisa que terminou e ``pc.close()`` fica preso para sempre. Depois do limite,
+    seguimos em frente e o fechamento continua em segundo plano.
+    """
+    try:
+        await asyncio.wait_for(asyncio.shield(pc.close()), timeout)
+    except asyncio.TimeoutError:
+        log.warning("fechamento da conexão WebRTC demorou; seguindo em frente")
+    except Exception:  # noqa: BLE001
+        log.debug("erro ao fechar conexão WebRTC", exc_info=True)
+
+
 def _sdp(desc: RTCSessionDescription) -> dict:
     return {"type": desc.type, "sdp": desc.sdp}
 
@@ -77,11 +93,15 @@ class HostSession:
         video_source: tuple[str, int],
         audio_source: tuple[str, int],
         on_stats: Callable[[int, int], None],
+        on_replaced: Callable[[], None] | None = None,
     ) -> None:
         """``video_source``: ("monitor", índice) | ("window", hwnd).
-        ``audio_source``: ("none", 0) | ("system", 0) | ("app", pid)."""
+        ``audio_source``: ("none", 0) | ("system", 0) | ("app", pid).
+        ``on_replaced``: outra pessoa começou a compartilhar na sala (só um por vez)."""
         self.code = code
         self.host_id = str(uuid.uuid4())
+        self.started_at = 0.0
+        self._on_replaced = on_replaced
         self.video_source = video_source
         self.audio_source = audio_source
         self._on_stats = on_stats
@@ -110,7 +130,9 @@ class HostSession:
                 on_peer_leave=lambda vid: asyncio.ensure_future(self._close_peer(vid)),
             )
             await self._room.join()
-            await self._room.send({"type": "host-ready", "from": self.host_id})
+            self.started_at = time.time()
+            # "at" desempata quando duas pessoas começam juntas (o app web não manda: conta como mais novo).
+            await self._room.send({"type": "host-ready", "from": self.host_id, "at": self.started_at})
         except Exception:
             await self.stop(notify=False)
             raise
@@ -158,7 +180,7 @@ class HostSession:
         pc = self._peers.pop(viewer_id, None)
         self._ice_queue.pop(viewer_id, None)
         if pc:
-            await pc.close()
+            await close_pc(pc)
         self._emit_stats()
 
     async def _connect_viewer(self, viewer_id: str) -> None:
@@ -189,6 +211,9 @@ class HostSession:
         sender = signal.get("from", "")
         if kind == "join":
             await self._connect_viewer(sender)
+        elif kind == "host-ready" and sender != self.host_id:
+            if self._on_replaced and signal.get("at", float("inf")) >= self.started_at:
+                self._on_replaced()
         elif kind == "answer":
             pc = self._peers.get(sender)
             if not pc:
@@ -229,6 +254,10 @@ class ViewerSession:
         self._room: Room | None = None
         self._pc: RTCPeerConnection | None = None
         self._host_id: str | None = None
+        # Quem anunciou por último que está compartilhando. Sinais de um apresentador
+        # anterior (que acabou de perder a vez) são ignorados.
+        self._latest_host: str | None = None
+        self._host_online: bool | None = None  # pela presence; None = ainda não sabemos
         self._ice_queue: list[dict] = []
         self._tasks: list[asyncio.Task] = []
         self._closed = False
@@ -248,7 +277,8 @@ class ViewerSession:
             on_peer_leave=self._handle_leave,
         )
         await self._room.join()
-        self._set_status("negotiating")
+        # A presence pode ter chegado durante o join: sem ninguém compartilhando, fica esperando.
+        self._set_status("waiting" if self._host_online is False else "negotiating")
         await self._request_stream()
 
     async def close(self) -> None:
@@ -276,7 +306,7 @@ class ViewerSession:
         pc, self._pc = self._pc, None
         self._host_id = None
         if pc:
-            await pc.close()
+            await close_pc(pc)
         if self.player:
             self.player.close()
             self.player = None
@@ -284,11 +314,12 @@ class ViewerSession:
 
     def _handle_peers(self, peers: list[dict]) -> None:
         host_online = any(p["role"] == "host" for p in peers)
+        self._host_online = host_online
         if not host_online and self.status in ("connecting", "negotiating"):
             self._set_status("waiting")
 
     def _handle_leave(self, peer_id: str) -> None:
-        if peer_id == self._host_id:
+        if peer_id == self._host_id or (self._host_id is None and peer_id == self._latest_host):
             asyncio.ensure_future(self._reset_peer())
             self._set_status("ended")
 
@@ -296,7 +327,11 @@ class ViewerSession:
         if self._closed:
             return
         kind = signal.get("type")
+        sender = signal.get("from")
+        if kind in ("host-stopped", "offer") and self._latest_host and sender != self._latest_host:
+            return
         if kind == "host-ready":
+            self._latest_host = sender
             await self._reset_peer()
             self._ice_queue.clear()
             self._set_status("negotiating")
@@ -306,6 +341,7 @@ class ViewerSession:
             self._ice_queue.clear()
             self._set_status("ended")
         elif kind == "offer":
+            self._latest_host = sender
             await self._handle_offer(signal)
         elif kind == "ice":
             pc = self._pc

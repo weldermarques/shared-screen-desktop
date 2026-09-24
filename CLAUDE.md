@@ -28,7 +28,8 @@ se recusa a abrir numa versão antiga.
 | `app/media.py` | Tracks aiortc: `ScreenTrack` (monitor/janela), `PcmTrack` + subclasses de áudio, `AudioPlayer` |
 | `app/winaudio.py` | WASAPI process loopback via ctypes (áudio só de um app / tudo menos um app) |
 | `app/winwindows.py` | Lista janelas/processos e captura janela com PrintWindow (ctypes) |
-| `app/ui/` | Páginas Qt: `home`, `host`, `viewer`, `voice` (widget `VoiceControls`) |
+| `app/ui/room.py` | A única tela: sala fixa `config.ROOM_CODE`; assiste, compartilha e voz |
+| `app/ui/voice.py` | Widget `VoiceControls` |
 | `app/updater.py` | Checagem de release no GitHub e instalação silenciosa |
 
 ## Protocolo compartilhado com o app web (não quebrar)
@@ -36,11 +37,20 @@ se recusa a abrir numa versão antiga.
 Qualquer mudança aqui precisa ser espelhada no web (`src/lib/signaling.ts`, `src/lib/voice.ts`),
 e versões antigas dos dois lados continuam existindo por um tempo.
 
+- Sala única e sem dono (`ROOM_CODE`, padrão `SALA`): o app abre direto nela. Quem compartilha
+  fecha o próprio `ViewerSession` (não assiste a si mesmo) e o reabre ao parar.
+- Uma transmissão por vez: `host-ready` leva `at` (timestamp). O `HostSession` que recebe um
+  `host-ready` mais novo de outro id chama `on_replaced` e para **sem** mandar `host-stopped`.
+  O `ViewerSession` ignora `offer`/`host-stopped` que não vêm do último `host-ready`.
 - Canal `screen:<código>` — transmissão. Sinais: `join`, `host-ready`, `host-stopped`,
   `offer`/`answer`/`ice` (com `from`/`to`). Presence `role`: `host` | `viewer`.
 - Canal `voice:<código>` — voz. Estar no canal = estar na voz (presence `role: voice`).
   Em cada par, **quem tem o id menor (comparação de string do UUID) manda o offer**. Sinais
   `offer`/`answer`/`ice` iguais aos da transmissão.
+- Presence da voz publica `{role: "voice", name, muted, sharing}` (atualizado com
+  `Room.update_meta`); é daí que sai a lista de pessoas com avatar. Quem não manda `name`
+  (o app web, por enquanto) aparece como "Navegador". O nome fica em `settings.json`
+  (`app/settings.py`), padrão = usuário do Windows.
 - aiortc **não faz trickle ICE**: candidatos do Python vão dentro do SDP; os do navegador
   chegam como `ice` e entram por `add_ice`. ICE que chega antes do offer/answer é enfileirado.
 - No web, sinais e presence podem chegar **antes** do `joinRoom` resolver — `voice.ts`
@@ -60,6 +70,14 @@ e versões antigas dos dois lados continuam existindo por um tempo.
   `QueryInterface`, senão a ativação falha.
 - Não há cancelamento de eco na voz do desktop; a UI recomenda fone.
 - Cada fonte de voz remota tem seu próprio `AudioPlayer` (um `OutputStream`); o Windows mixa.
+
+## Armadilhas do qasync (Windows)
+
+- `pc.close()` pode nunca terminar (o socket UDP do aioice não avisa que fechou): use sempre
+  `rtc.close_pc()`, que tem limite de tempo.
+- Evite `asyncio.Event`/`wait_for` em código chamado a cada quadro de mídia; `get_running_loop()`
+  pode falhar dentro de tarefas do qasync. Por isso o microfone espera dados por sondagem.
+- Scripts de teste com Qt precisam de `app.setQuitOnLastWindowClosed(False)`, como o app.
 
 ## Convenções
 

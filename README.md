@@ -61,6 +61,14 @@ Requer o Inno Setup 6 (`winget install JRSoftware.InnoSetup`).
 - Sem internet ou com a API do GitHub fora do ar, o app abre normalmente e tenta de novo depois.
 - O repositório precisa ser **público** (a API e o download são feitos sem autenticação).
 
+## Sala única
+
+O app não tem tela inicial: ao abrir, você já está na sala (código em `ROOM_CODE`, padrão
+`SALA`), que existe sempre, sem dono. Ao entrar, você assiste a quem estiver compartilhando e
+entra na voz com o microfone **mutado**. Qualquer um pode clicar em **Compartilhar minha tela**;
+só uma pessoa compartilha por vez — quem começa por último assume, e a transmissão anterior
+para sozinha. O 📎 ao lado do nome da sala copia o link para assistir pelo navegador.
+
 ## Voz da sala
 
 Qualquer pessoa na sala (apresentador ou espectador, no app ou no navegador) pode clicar em
