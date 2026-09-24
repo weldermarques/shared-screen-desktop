@@ -14,6 +14,7 @@ import time
 import uuid
 from typing import Callable
 
+import numpy as np
 import aiortc.codecs.h264 as _h264
 import aiortc.codecs.vpx as _vpx
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
@@ -77,6 +78,16 @@ async def close_pc(pc: RTCPeerConnection, timeout: float = 2) -> None:
         log.warning("fechamento da conexão WebRTC demorou; seguindo em frente")
     except Exception:  # noqa: BLE001
         log.debug("erro ao fechar conexão WebRTC", exc_info=True)
+
+
+def _frame_to_rgb(frame, size: tuple[int, int] | None):
+    """VideoFrame -> ndarray RGB, reduzido para caber em ``size`` (roda fora do loop)."""
+    w, h = frame.width, frame.height
+    if size and size[0] > 0 and size[1] > 0:
+        scale = min(size[0] / w, size[1] / h, 1.0)
+        w, h = max(2, int(w * scale) // 2 * 2), max(2, int(h * scale) // 2 * 2)
+    # Em larguras "quebradas" o PyAV devolve linhas com preenchimento; o QImage exige contíguo.
+    return np.ascontiguousarray(frame.reformat(width=w, height=h, format="rgb24").to_ndarray())
 
 
 def _sdp(desc: RTCSessionDescription) -> dict:
@@ -248,6 +259,8 @@ class ViewerSession:
         self._on_frame = on_frame
         self._on_audio = on_audio
         self.status = "connecting"
+        # Tamanho (em pixels) em que o vídeo é mostrado; os quadros já chegam nesse tamanho.
+        self.video_size: Callable[[], tuple[int, int]] | None = None
         self.player: AudioPlayer | None = None
         self.volume = 1.0
         self.muted = False
@@ -389,10 +402,20 @@ class ViewerSession:
             )
 
     async def _consume_video(self, track) -> None:
+        # Converter/redimensionar um quadro 1080p leva ~10-20 ms; feito no loop, atrasava os
+        # pacotes de voz (cortes). Vai para uma thread e já sai no tamanho em que será mostrado.
+        loop = asyncio.get_event_loop()
         try:
             while True:
                 frame = await track.recv()
-                self._on_frame(frame.to_ndarray(format="rgb24"))
+                size = self.video_size() if self.video_size else None
+                try:
+                    rgb = await loop.run_in_executor(None, _frame_to_rgb, frame, size)
+                    self._on_frame(rgb)
+                except (MediaStreamError, asyncio.CancelledError):
+                    raise
+                except Exception:  # noqa: BLE001 - um quadro ruim não pode matar o vídeo
+                    log.exception("falha ao mostrar quadro de vídeo")
         except (MediaStreamError, asyncio.CancelledError):
             pass
 

@@ -60,6 +60,10 @@ class VideoWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMinimumSize(320, 180)
 
+    def target_size(self) -> tuple[int, int]:
+        dpr = self.devicePixelRatioF() or 1.0
+        return int(self.width() * dpr), int(self.height() * dpr)
+
     def set_frame(self, rgb: np.ndarray) -> None:
         h, w = rgb.shape[:2]
         self._image = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
@@ -260,6 +264,7 @@ class RoomPage(QWidget):
         if self._closed or self.viewer:
             return
         viewer = ViewerSession(self.code, self._viewer_status, self._on_frame, self._on_stream_audio)
+        viewer.video_size = self.video.target_size
         self.viewer = viewer
         self._apply_stream_volume()
         try:
@@ -501,7 +506,7 @@ class RoomPage(QWidget):
         img = getattr(track, "_latest", None)
         if img is None:
             return
-        step = max(1, img.shape[1] // 1280)
+        step = max(1, -(-img.shape[1] // 960))  # arredonda para cima: no máx. ~960 px de largura
         # BGRA -> RGB, reduzido: só uma pré-visualização.
         self.video.set_frame(np.ascontiguousarray(img[::step, ::step, 2::-1]))
 
