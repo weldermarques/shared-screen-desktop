@@ -15,6 +15,10 @@ App desktop em Python que **apresenta e assiste** nas mesmas salas do app web
 | Instalador | PyInstaller + Inno Setup (instala por usuário, sem admin) |
 | Atualização | GitHub Releases, **obrigatória** |
 
+## Download
+
+**[Baixar o instalador (versão mais recente)](https://github.com/weldermarques/shared-screen-desktop/releases/latest/download/SharedScreen-Setup.exe)**
+
 ## Rodando do código-fonte
 
 ```powershell

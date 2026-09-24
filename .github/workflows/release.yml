@@ -43,8 +43,15 @@ jobs:
           GITHUB_REPO: ${{ github.repository }}
         run: ./build.ps1 -Version "${{ github.ref_name }}"
 
+      # Cópia com nome fixo para o link permanente:
+      # https://github.com/<repo>/releases/latest/download/SharedScreen-Setup.exe
+      - name: Cópia com nome fixo
+        run: Copy-Item dist-installer\SharedScreen-Setup-*.exe dist-installer\SharedScreen-Setup.exe
+
       - name: Publicar release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist-installer/SharedScreen-Setup-*.exe
+          files: |
+            dist-installer/SharedScreen-Setup-*.exe
+            dist-installer/SharedScreen-Setup.exe
           generate_release_notes: true
