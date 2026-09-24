@@ -1,5 +1,5 @@
-"""Captura de tela (mss) e de áudio do sistema (WASAPI loopback) como tracks do aiortc,
-e reprodução do áudio recebido (sounddevice)."""
+"""Captura de tela/janela e de áudio (PC inteiro, um aplicativo ou microfone) como
+tracks do aiortc, e reprodução do áudio recebido (sounddevice)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import asyncio
 import ctypes
 import fractions
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -97,15 +98,18 @@ def _draw_cursor(img: np.ndarray, x: int, y: int, scale: int) -> None:
 
 
 class ScreenTrack(MediaStreamTrack):
-    """Track de vídeo que captura um monitor numa thread própria."""
+    """Track de vídeo que captura um monitor ou uma janela numa thread própria.
+
+    ``source`` é ("monitor", índice do mss) ou ("window", hwnd).
+    """
 
     kind = "video"
 
-    def __init__(self, monitor_index: int = 1, fps: int = 20, max_height: int = 1080) -> None:
+    def __init__(self, source: tuple[str, int] = ("monitor", 1), fps: int = 20, max_height: int = 1080) -> None:
         super().__init__()
         self.fps = fps
         self.max_height = max_height
-        self._monitor_index = monitor_index
+        self._source = source
         self._latest: np.ndarray | None = None
         self._lock = threading.Lock()
         self._running = True
@@ -114,8 +118,20 @@ class ScreenTrack(MediaStreamTrack):
         self._thread = threading.Thread(target=self._capture_loop, name="screen-capture", daemon=True)
         self._thread.start()
 
-    def set_monitor(self, index: int) -> None:
-        self._monitor_index = index
+    def set_source(self, source: tuple[str, int]) -> None:
+        self._source = source
+
+    def _grab(self, sct) -> tuple[np.ndarray, int, int] | None:
+        kind, value = self._source
+        if kind == "window":
+            from .winwindows import grab_window
+
+            return grab_window(value)  # minimizada: None, mantém o último quadro
+        monitors = sct.monitors
+        mon = monitors[value if value < len(monitors) else 1]
+        shot = sct.grab(mon)
+        img = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4).copy()
+        return img, mon["left"], mon["top"]
 
     def _capture_loop(self) -> None:
         interval = 1 / self.fps
@@ -123,16 +139,15 @@ class ScreenTrack(MediaStreamTrack):
             while self._running:
                 t0 = time.perf_counter()
                 try:
-                    monitors = sct.monitors
-                    mon = monitors[self._monitor_index if self._monitor_index < len(monitors) else 1]
-                    shot = sct.grab(mon)
-                    img = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4).copy()
-                    pos = _cursor_pos()
-                    if pos:
-                        scale = max(1, round(shot.height / 1080))
-                        _draw_cursor(img, pos[0] - mon["left"], pos[1] - mon["top"], scale)
-                    with self._lock:
-                        self._latest = img
+                    grabbed = self._grab(sct)
+                    if grabbed is not None:
+                        img, left, top = grabbed
+                        pos = _cursor_pos()
+                        if pos:
+                            scale = max(1, round(img.shape[0] / 1080))
+                            _draw_cursor(img, pos[0] - left, pos[1] - top, scale)
+                        with self._lock:
+                            self._latest = img
                 except Exception:  # noqa: BLE001 - ex.: tela bloqueada (UAC/lock screen)
                     log.debug("falha na captura", exc_info=True)
                 time.sleep(max(0, interval - (time.perf_counter() - t0)))
@@ -175,66 +190,74 @@ class ScreenTrack(MediaStreamTrack):
 # ---------------------------------------------------------------- áudio (captura)
 
 
-class SystemAudioTrack(MediaStreamTrack):
-    """Áudio de tudo que toca no PC (loopback do dispositivo de saída padrão)."""
+class PcmTrack(MediaStreamTrack):
+    """Base das tracks de áudio: recebe PCM s16 intercalado de uma thread de captura
+    (``_push``) e entrega frames estéreo de 20 ms.
+
+    ``device_clock=False`` (loopback): o ritmo é o do relógio e falta de dados vira silêncio,
+    porque o loopback do WASAPI não entrega nada quando está tudo quieto.
+    ``device_clock=True`` (microfone): espera os dados do dispositivo, que entrega
+    continuamente; completar com silêncio aqui abriria buracos na voz.
+    """
 
     kind = "audio"
 
-    def __init__(self) -> None:
+    def __init__(self, rate: int, channels: int, device_clock: bool = False) -> None:
         super().__init__()
-        import pyaudiowpatch as pyaudio
-
         self.muted = False
-        self._pa = pyaudio.PyAudio()
-        wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-        speakers = self._pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
-        if not speakers.get("isLoopbackDevice"):
-            for dev in self._pa.get_loopback_device_info_generator():
-                if speakers["name"] in dev["name"]:
-                    speakers = dev
-                    break
-            else:
-                raise RuntimeError("Dispositivo de loopback de áudio não encontrado.")
-
-        self.rate = int(speakers["defaultSampleRate"])
-        self.channels = max(1, int(speakers["maxInputChannels"]))
-        self._samples = int(self.rate * AUDIO_PTIME)
+        self.rate = rate
+        self.channels = channels
+        self._device_clock = device_clock
+        self._samples = int(rate * AUDIO_PTIME)
         self._buf = bytearray()
         self._buf_lock = threading.Lock()
-        self._max_bytes = int(self.rate * 0.25) * self.channels * 2  # até 250 ms de atraso
+        self._max_bytes = int(rate * 0.25) * channels * 2  # até 250 ms de atraso
         self._pts = 0
         self._start: float | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._data = asyncio.Event()
 
-        def callback(in_data, frame_count, time_info, status):
+    def _push(self, data: bytes) -> None:
+        with self._buf_lock:
+            self._buf.extend(data)
+            overflow = len(self._buf) - self._max_bytes
+            if overflow > 0:
+                del self._buf[:overflow]
+        loop = self._loop
+        if self._device_clock and loop is not None:
+            try:
+                loop.call_soon_threadsafe(self._data.set)
+            except RuntimeError:  # loop já fechado
+                pass
+
+    async def _wait_device(self, need: int) -> None:
+        self._loop = asyncio.get_running_loop()
+        while self.readyState == "live":
+            self._data.clear()
             with self._buf_lock:
-                self._buf.extend(in_data)
-                overflow = len(self._buf) - self._max_bytes
-                if overflow > 0:
-                    del self._buf[:overflow]
-            return (None, pyaudio.paContinue)
-
-        self._stream = self._pa.open(
-            format=pyaudio.paInt16,
-            channels=self.channels,
-            rate=self.rate,
-            input=True,
-            input_device_index=speakers["index"],
-            frames_per_buffer=self._samples,
-            stream_callback=callback,
-        )
-        log.info("capturando áudio de %s (%s Hz, %s canais)", speakers["name"], self.rate, self.channels)
+                if len(self._buf) >= need:
+                    # Atraso acumulado (ex.: ninguém consumia ainda) vira atraso fixo: descarta.
+                    if len(self._buf) > need * 3:
+                        del self._buf[: len(self._buf) - need]
+                    return
+            try:
+                await asyncio.wait_for(self._data.wait(), 0.5)
+            except asyncio.TimeoutError:
+                return  # dispositivo parado: manda silêncio para não travar a conexão
 
     async def recv(self) -> av.AudioFrame:
         if self.readyState != "live":
             raise asyncio.CancelledError
-        if self._start is None:
+        need = self._samples * self.channels * 2
+        if self._device_clock:
+            await self._wait_device(need)
+        elif self._start is None:
             self._start = time.time()
         else:
             wait = self._start + self._pts / self.rate - time.time()
             if wait > 0:
                 await asyncio.sleep(wait)
 
-        need = self._samples * self.channels * 2
         with self._buf_lock:
             chunk = bytes(self._buf[:need])
             del self._buf[:need]
@@ -255,6 +278,44 @@ class SystemAudioTrack(MediaStreamTrack):
         self._pts += self._samples
         return frame
 
+
+class SystemAudioTrack(PcmTrack):
+    """Áudio de tudo que toca no PC (loopback do dispositivo de saída padrão).
+
+    Fallback para Windows antigo: inclui também o que o próprio app toca (voz da sala).
+    """
+
+    def __init__(self) -> None:
+        import pyaudiowpatch as pyaudio
+
+        self._pa = pyaudio.PyAudio()
+        wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+        speakers = self._pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
+        if not speakers.get("isLoopbackDevice"):
+            for dev in self._pa.get_loopback_device_info_generator():
+                if speakers["name"] in dev["name"]:
+                    speakers = dev
+                    break
+            else:
+                raise RuntimeError("Dispositivo de loopback de áudio não encontrado.")
+
+        super().__init__(int(speakers["defaultSampleRate"]), max(1, int(speakers["maxInputChannels"])))
+
+        def callback(in_data, frame_count, time_info, status):
+            self._push(in_data)
+            return (None, pyaudio.paContinue)
+
+        self._stream = self._pa.open(
+            format=pyaudio.paInt16,
+            channels=self.channels,
+            rate=self.rate,
+            input=True,
+            input_device_index=speakers["index"],
+            frames_per_buffer=self._samples,
+            stream_callback=callback,
+        )
+        log.info("capturando áudio de %s (%s Hz, %s canais)", speakers["name"], self.rate, self.channels)
+
     def stop(self) -> None:
         super().stop()
         try:
@@ -265,6 +326,65 @@ class SystemAudioTrack(MediaStreamTrack):
             pass
 
 
+class ProcessAudioTrack(PcmTrack):
+    """Áudio de um aplicativo só (include) ou de todo o PC menos um aplicativo (exclude)."""
+
+    def __init__(self, pid: int, include: bool) -> None:
+        from .winaudio import ProcessLoopbackCapture
+
+        super().__init__(ProcessLoopbackCapture.RATE, ProcessLoopbackCapture.CHANNELS)
+        self._capture = ProcessLoopbackCapture(pid, include, self._push)
+        log.info("capturando áudio %s o processo %s", "só de" if include else "de tudo menos", pid)
+
+    def stop(self) -> None:
+        super().stop()
+        self._capture.stop()
+
+
+class MicrophoneTrack(PcmTrack):
+    """Microfone padrão do Windows (voz da sala)."""
+
+    def __init__(self) -> None:
+        import sounddevice as sd
+
+        super().__init__(48000, 1, device_clock=True)
+        self._stream = sd.RawInputStream(
+            samplerate=self.rate,
+            channels=1,
+            dtype="int16",
+            blocksize=self._samples,
+            callback=lambda data, frames, t, status: self._push(bytes(data)),
+        )
+        self._stream.start()
+        log.info("microfone aberto: %s", sd.query_devices(kind="input")["name"])
+
+    def stop(self) -> None:
+        super().stop()
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def open_audio_source(source: tuple[str, int]) -> PcmTrack | None:
+    """("none", 0) | ("system", 0) | ("app", pid)."""
+    from . import winaudio
+
+    kind, pid = source
+    if kind == "app":
+        return ProcessAudioTrack(pid, include=True)
+    if kind == "system":
+        # Todo o PC menos o próprio app: não retransmite a voz da sala.
+        if winaudio.is_supported():
+            try:
+                return ProcessAudioTrack(os.getpid(), include=False)
+            except Exception:  # noqa: BLE001
+                log.warning("process loopback indisponível; usando loopback do PC inteiro", exc_info=True)
+        return SystemAudioTrack()
+    return None
+
+
 # ---------------------------------------------------------------- áudio (reprodução)
 
 
@@ -273,6 +393,9 @@ class AudioPlayer:
 
     RATE = 48000
     CHANNELS = 2
+    START_BUFFER = 0.08  # s
+    MAX_BUFFER = 0.30
+    BUFFER_STEP = 0.04
 
     def __init__(self) -> None:
         import sounddevice as sd
@@ -282,6 +405,8 @@ class AudioPlayer:
         self._chunks: deque[np.ndarray] = deque()
         self._pending = 0
         self._primed = False
+        # Folga antes de tocar: cresce a cada falta de áudio (rede instável) até o teto.
+        self._target = self.START_BUFFER
         self._lock = threading.Lock()
         self._stream = sd.OutputStream(
             samplerate=self.RATE, channels=self.CHANNELS, dtype="int16", callback=self._callback, latency="low"
@@ -295,15 +420,15 @@ class AudioPlayer:
             with self._lock:
                 self._chunks.append(pcm)
                 self._pending += len(pcm)
-                # Descarta atraso acumulado acima de ~300 ms.
-                while self._pending > self.RATE * 0.3 and self._chunks:
+                # Descarta atraso acumulado bem acima da folga desejada.
+                while self._pending > self.RATE * (self._target + 0.25) and self._chunks:
                     self._pending -= len(self._chunks.popleft())
 
     def _callback(self, outdata, frames, time_info, status) -> None:
         outdata.fill(0)
         with self._lock:
             if not self._primed:
-                if self._pending < self.RATE * 0.06:  # espera 60 ms de buffer
+                if self._pending < self.RATE * self._target:
                     return
                 self._primed = True
             filled = 0
@@ -319,6 +444,7 @@ class AudioPlayer:
                 filled += take
             if filled < frames:
                 self._primed = False
+                self._target = min(self.MAX_BUFFER, self._target + self.BUFFER_STEP)
         vol = 0.0 if self.muted else self.volume
         if vol != 1.0:
             outdata[:] = (outdata * vol).astype(np.int16)

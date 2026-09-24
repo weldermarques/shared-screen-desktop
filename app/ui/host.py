@@ -7,11 +7,12 @@ from typing import Callable
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QImage, QPixmap
-from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLineEdit, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLineEdit, QMessageBox, QScrollArea, QVBoxLayout, QWidget
 
-from .. import config
+from .. import config, winaudio, winwindows
 from ..media import list_monitors
 from ..rtc import HostSession, random_code
+from .voice import VoiceControls
 from .widgets import button, card, label
 
 log = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class HostPage(QWidget):
         self.code = random_code()
         self.session: HostSession | None = None
         self._audio_muted = False
+        self._audio_label = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 16, 24, 24)
@@ -45,7 +47,21 @@ class HostPage(QWidget):
 
         panel, col = card()
         panel.setFixedWidth(370)
-        body.addWidget(panel, 0, Qt.AlignmentFlag.AlignTop)
+        # Em janela baixa o painel rola em vez de espremer os botões.
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedWidth(382)
+        scroll.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }"
+            "QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }"
+            "QScrollBar::handle:vertical { background: #2a3140; border-radius: 4px; min-height: 30px; }"
+            "QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page"
+            " { background: none; height: 0; }"
+        )
+        body.addWidget(scroll)
 
         col.addWidget(label("CÓDIGO DA SALA", "label"))
         col.addWidget(label(self.code, "code"))
@@ -60,17 +76,28 @@ class HostPage(QWidget):
         col.addLayout(link_row)
         col.addSpacing(6)
 
-        col.addWidget(label("MONITOR", "label"))
-        self.monitor_combo = QComboBox()
-        for mon in list_monitors():
-            self.monitor_combo.addItem(f"Monitor {mon['index']} — {mon['width']}×{mon['height']}", mon["index"])
-        self.monitor_combo.currentIndexChanged.connect(self._monitor_changed)
-        col.addWidget(self.monitor_combo)
+        col.addWidget(label("O QUE COMPARTILHAR", "label"))
+        source_row = QHBoxLayout()
+        self.source_combo = QComboBox()
+        self.source_combo.setMinimumWidth(0)
+        self.source_combo.activated.connect(self._source_changed)
+        source_row.addWidget(self.source_combo, 1)
+        refresh = button("🔄", "secondary")
+        refresh.setFixedWidth(40)
+        refresh.setStyleSheet("padding: 6px 0; font-size: 12pt;")
+        refresh.setToolTip("Atualizar a lista de janelas e aplicativos")
+        refresh.clicked.connect(self._fill_sources)
+        source_row.addWidget(refresh)
+        col.addLayout(source_row)
 
-        self.audio_check = QCheckBox("Transmitir o áudio do PC")
-        self.audio_check.setChecked(True)
-        col.addWidget(self.audio_check)
-        col.addWidget(label("Envia tudo que toca no computador (filme, música, notificações).", "hint", wrap=True))
+        col.addWidget(label("ÁUDIO", "label"))
+        self.audio_combo = QComboBox()
+        self.audio_combo.setMinimumWidth(0)
+        self.audio_combo.currentIndexChanged.connect(self._audio_hint_changed)
+        col.addWidget(self.audio_combo)
+        self.audio_hint = label("", "hint", wrap=True)
+        col.addWidget(self.audio_hint)
+        self._fill_sources()
 
         stats = QHBoxLayout()
         self.viewers_lbl = label("", "stat")
@@ -101,6 +128,12 @@ class HostPage(QWidget):
         self.error_lbl.hide()
         col.addWidget(self.error_lbl)
 
+        col.addSpacing(6)
+        col.addWidget(label("VOZ DA SALA", "label"))
+        self.voice = VoiceControls(self.code, two_rows=True)
+        col.addWidget(self.voice)
+        col.addWidget(label("Converse com quem está na sala (app ou navegador). Use fone para não dar eco.", "hint", wrap=True))
+
         self.preview = label("A pré-visualização aparece aqui", "muted")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumSize(320, 180)
@@ -119,14 +152,68 @@ class HostPage(QWidget):
 
     def _back(self) -> None:
         async def go() -> None:
-            await self.stop()
+            await self.leave()
             self._on_back()
 
         asyncio.ensure_future(go())
 
-    def _monitor_changed(self) -> None:
+    def _fill_sources(self) -> None:
+        """Monitores + janelas abertas; e as fontes de áudio (PC inteiro / um app / nenhuma)."""
+        current_video = self.source_combo.currentData()
+        current_audio = self.audio_combo.currentData()
+        windows = winwindows.list_windows()
+
+        self.source_combo.blockSignals(True)
+        self.source_combo.clear()
+        for mon in list_monitors():
+            self.source_combo.addItem(
+                f"🖥️ Monitor {mon['index']} — {mon['width']}×{mon['height']}", ("monitor", mon["index"])
+            )
+        for win in windows:
+            self.source_combo.addItem(f"🪟 {_short(win['title'])}  ({win['exe']})", ("window", win["hwnd"]))
+            self.source_combo.setItemData(self.source_combo.count() - 1, win["title"], Qt.ItemDataRole.ToolTipRole)
+        index = self.source_combo.findData(current_video)
+        self.source_combo.setCurrentIndex(max(0, index))
+        self.source_combo.blockSignals(False)
+
+        self.audio_combo.blockSignals(True)
+        self.audio_combo.clear()
+        self.audio_combo.addItem("🔊 Todo o PC", ("system", 0))
+        if winaudio.is_supported():
+            for app in winwindows.list_audio_apps():
+                self.audio_combo.addItem(f"🎯 Só {app['exe']} — {_short(app['title'], 32)}", ("app", app["pid"]))
+        self.audio_combo.addItem("🔇 Sem áudio", ("none", 0))
+        index = self.audio_combo.findData(current_audio)
+        self.audio_combo.setCurrentIndex(max(0, index))
+        self.audio_combo.blockSignals(False)
+        self._audio_hint_changed()
+        self._windows = {w["hwnd"]: w for w in windows}
+
+    def _source_changed(self) -> None:
+        source = self.source_combo.currentData()
+        if not source:
+            return
         if self.session:
-            self.session.set_monitor(self.monitor_combo.currentData())
+            self.session.set_video_source(source)
+            return
+        # Escolheu uma janela: por padrão manda só o som daquele aplicativo.
+        win = self._windows.get(source[1]) if source[0] == "window" else None
+        if win and self.audio_combo.currentData() != ("none", 0):
+            index = self.audio_combo.findData(("app", win["root_pid"]))
+            if index >= 0:
+                self.audio_combo.setCurrentIndex(index)
+
+    def _audio_hint_changed(self) -> None:
+        kind = (self.audio_combo.currentData() or ("none", 0))[0]
+        if kind == "system":
+            text = "Tudo que toca no computador (filme, música, notificações). A voz da sala não vai junto."
+            if not winaudio.is_supported():
+                text = "Tudo que toca no computador. Para escolher um aplicativo só, é preciso Windows 10 (2004) ou mais novo."
+        elif kind == "app":
+            text = "Só o som deste aplicativo (ex.: só o navegador). O resto do PC fica de fora."
+        else:
+            text = "A transmissão vai sem som."
+        self.audio_hint.setText(text)
 
     def _start(self) -> None:
         asyncio.ensure_future(self._start_async())
@@ -135,11 +222,13 @@ class HostPage(QWidget):
         self.error_lbl.hide()
         self.start_btn.setEnabled(False)
         self.start_btn.setText("Iniciando…")
-        self.audio_check.setEnabled(False)
+        self.audio_combo.setEnabled(False)
+        audio_source = self.audio_combo.currentData() or ("none", 0)
+        self._audio_label = self.audio_combo.currentText().split(" — ")[0].replace("🎯 Só ", "")
         session = HostSession(
             self.code,
-            self.monitor_combo.currentData() or 1,
-            self.audio_check.isChecked(),
+            self.source_combo.currentData() or ("monitor", 1),
+            audio_source,
             on_stats=self._set_stats,
         )
         try:
@@ -156,10 +245,15 @@ class HostPage(QWidget):
         self.stop_btn.show()
         self.live_badge.show()
         self._refresh_audio()
-        if self.audio_check.isChecked() and not session.has_audio:
-            self.error_lbl.setText("Não foi possível capturar o áudio do PC; transmitindo só o vídeo.")
+        if audio_source[0] != "none" and not session.has_audio:
+            self.error_lbl.setText("Não foi possível capturar o áudio; transmitindo só o vídeo.")
             self.error_lbl.show()
         self._preview_timer.start(500)
+
+    async def leave(self) -> None:
+        """Sai da página: encerra a transmissão e a voz."""
+        await self.stop()
+        await self.voice.stop()
 
     async def stop(self) -> None:
         session, self.session = self.session, None
@@ -174,7 +268,7 @@ class HostPage(QWidget):
         self.start_btn.show()
         self.stop_btn.hide()
         self.live_badge.hide()
-        self.audio_check.setEnabled(True)
+        self.audio_combo.setEnabled(True)
         self.audio_status.hide()
         self.mute_btn.hide()
         self.preview.clear()
@@ -191,12 +285,13 @@ class HostPage(QWidget):
         has_audio = bool(self.session and self.session.has_audio)
         self.audio_status.setVisible(True)
         self.mute_btn.setVisible(has_audio)
+        what = f"de {self._audio_label}" if self.session and self.session.audio_source[0] == "app" else "do PC"
         if not has_audio:
             text, style = "🔇 Sem áudio na transmissão", "info"
         elif self._audio_muted:
-            text, style = "🔇 Áudio do PC mutado", "info"
+            text, style = f"🔇 Áudio {what} mutado", "info"
         else:
-            text, style = "🔊 Enviando o áudio do PC", "warn"
+            text, style = f"🔊 Enviando o áudio {what}", "warn"
         self.audio_status.setText(text)
         self.audio_status.setObjectName(style)
         self.audio_status.style().unpolish(self.audio_status)
@@ -228,3 +323,7 @@ class HostPage(QWidget):
             return True
         answer = QMessageBox.question(self, "Encerrar transmissão", "Você está transmitindo. Deseja encerrar?")
         return answer == QMessageBox.StandardButton.Yes
+
+
+def _short(text: str, limit: int = 40) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"

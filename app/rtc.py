@@ -21,7 +21,7 @@ from aiortc.mediastreams import MediaStreamError
 from aiortc.sdp import candidate_from_sdp
 
 from . import config
-from .media import AudioPlayer, ScreenTrack, SystemAudioTrack
+from .media import AudioPlayer, PcmTrack, ScreenTrack, open_audio_source
 from .signaling import Room, Signal
 
 log = logging.getLogger(__name__)
@@ -74,31 +74,32 @@ class HostSession:
     def __init__(
         self,
         code: str,
-        monitor_index: int,
-        include_audio: bool,
+        video_source: tuple[str, int],
+        audio_source: tuple[str, int],
         on_stats: Callable[[int, int], None],
     ) -> None:
+        """``video_source``: ("monitor", índice) | ("window", hwnd).
+        ``audio_source``: ("none", 0) | ("system", 0) | ("app", pid)."""
         self.code = code
         self.host_id = str(uuid.uuid4())
-        self.monitor_index = monitor_index
-        self.include_audio = include_audio
+        self.video_source = video_source
+        self.audio_source = audio_source
         self._on_stats = on_stats
         self._viewers = 0
         self.video: ScreenTrack | None = None
-        self.audio: SystemAudioTrack | None = None
+        self.audio: PcmTrack | None = None
         self._relay = MediaRelay()
         self._peers: dict[str, RTCPeerConnection] = {}
         self._ice_queue: dict[str, list[dict]] = {}
         self._room: Room | None = None
 
     async def start(self) -> None:
-        self.video = ScreenTrack(self.monitor_index)
-        if self.include_audio:
-            try:
-                self.audio = SystemAudioTrack()
-            except Exception:
-                log.exception("não foi possível capturar o áudio do sistema")
-                self.audio = None
+        self.video = ScreenTrack(self.video_source)
+        try:
+            self.audio = open_audio_source(self.audio_source)
+        except Exception:
+            log.exception("não foi possível capturar o áudio %s", self.audio_source)
+            self.audio = None
         try:
             self._room = Room(
                 self.code,
@@ -122,10 +123,10 @@ class HostSession:
         if self.audio:
             self.audio.muted = muted
 
-    def set_monitor(self, index: int) -> None:
-        self.monitor_index = index
+    def set_video_source(self, source: tuple[str, int]) -> None:
+        self.video_source = source
         if self.video:
-            self.video.set_monitor(index)
+            self.video.set_source(source)
 
     async def stop(self, notify: bool = True) -> None:
         if self._room and notify:

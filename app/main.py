@@ -89,12 +89,14 @@ async def selftest() -> bool:
     from .rtc import HostSession, ViewerSession, random_code
 
     code = random_code()
-    host = HostSession(code, 1, True, on_stats=lambda v, c: None)
+    host = HostSession(code, ("monitor", 1), ("system", 0), on_stats=lambda v, c: None)
     frames: list = []
     audio: list[bool] = []
     viewer = ViewerSession(code, lambda s: log.info("selftest status: %s", s), frames.append, audio.append)
+    had_audio = False
     try:
         await host.start()
+        had_audio = host.has_audio
         await viewer.start()
         for _ in range(40):
             if len(frames) >= 10:
@@ -104,7 +106,7 @@ async def selftest() -> bool:
         await viewer.close()
         await host.stop()
     ok = len(frames) >= 10
-    log.info("selftest: %s (frames=%d, audio_host=%s, audio_viewer=%s)", "OK" if ok else "FALHOU", len(frames), host.include_audio, any(audio))
+    log.info("selftest: %s (frames=%d, audio_host=%s, audio_viewer=%s)", "OK" if ok else "FALHOU", len(frames), had_audio, any(audio))
     return ok
 
 

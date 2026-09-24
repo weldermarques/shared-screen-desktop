@@ -1,4 +1,7 @@
-"""Sinalização via Supabase Realtime — mesmo protocolo do app web (src/lib/signaling.ts)."""
+"""Sinalização via Supabase Realtime — mesmo protocolo do app web (src/lib/signaling.ts).
+
+Canais: ``screen:<código>`` (transmissão) e ``voice:<código>`` (chat de voz da sala).
+"""
 
 from __future__ import annotations
 
@@ -24,8 +27,10 @@ class Room:
         on_signal: Callable[[Signal], Awaitable[None]],
         on_peers: Callable[[list[dict[str, str]]], None] | None = None,
         on_peer_leave: Callable[[str], None] | None = None,
+        topic: str = "screen",
     ) -> None:
         self.code = code
+        self.topic = topic
         self.peer_id = peer_id
         self.role = role
         self._on_signal = on_signal
@@ -41,7 +46,7 @@ class Room:
 
         self._client = AsyncRealtimeClient(f"{config.SUPABASE_URL}/realtime/v1", config.SUPABASE_ANON_KEY)
         channel = self._client.channel(
-            f"screen:{self.code}",
+            f"{self.topic}:{self.code}",
             {
                 "config": {
                     "broadcast": {"self": False, "ack": False},

@@ -8,8 +8,9 @@ App desktop em Python que **apresenta e assiste** nas mesmas salas do app web
 |---|---|
 | Interface | PySide6 (Qt) + qasync |
 | WebRTC | aiortc (VP8 + Opus) |
-| Captura de tela | mss (+ ponteiro do mouse desenhado) |
-| Áudio do PC | WASAPI loopback (PyAudioWPatch) |
+| Captura de tela | mss (monitor) ou PrintWindow (janela), + ponteiro do mouse desenhado |
+| Áudio transmitido | WASAPI *process loopback* (PC inteiro menos o app, ou só um aplicativo); PyAudioWPatch como fallback |
+| Voz da sala | microfone via sounddevice, malha WebRTC no canal `voice:<código>` |
 | Reprodução de áudio | sounddevice |
 | Sinalização | Supabase Realtime (`realtime`), mesmo protocolo do `src/lib/signaling.ts` do app web |
 | Instalador | PyInstaller + Inno Setup (instala por usuário, sem admin) |
@@ -60,10 +61,32 @@ Requer o Inno Setup 6 (`winget install JRSoftware.InnoSetup`).
 - Sem internet ou com a API do GitHub fora do ar, o app abre normalmente e tenta de novo depois.
 - O repositório precisa ser **público** (a API e o download são feitos sem autenticação).
 
+## Voz da sala
+
+Qualquer pessoa na sala (apresentador ou espectador, no app ou no navegador) pode clicar em
+**Entrar na voz**. A voz é independente da transmissão: dá para conversar antes de começar a
+compartilhar. Cada participante se conecta direto com os outros (malha), então funciona bem
+para grupos pequenos (~2–6 pessoas).
+
+## Áudio só de um aplicativo
+
+Em **Áudio**, escolha "Só chrome.exe" (ou outro app) para transmitir apenas o som daquele
+programa — o equivalente no desktop a "compartilhar o áudio da aba" do navegador (um app
+desktop não consegue capturar uma aba isolada; captura o navegador inteiro). Ao escolher uma
+janela em **O que compartilhar**, o áudio daquele aplicativo é selecionado automaticamente.
+"Todo o PC" envia tudo **menos** o som do próprio Shared Screen, para a voz da sala não voltar
+como eco na transmissão.
+
 ## Limitações
 
-- Só Windows (captura de áudio via WASAPI).
-- O áudio transmitido é o do PC inteiro; use "Mutar áudio" para cortar na hora.
+- Só Windows. Áudio por aplicativo exige Windows 10 2004 (build 19041) ou mais novo; em
+  versões antigas só existe "Todo o PC" (e aí a voz da sala vai junto na transmissão).
+- O app desktop não tem cancelamento de eco na voz: use fone de ouvido. (No navegador o
+  cancelamento de eco é do próprio navegador.)
+- A voz usa o microfone padrão do Windows. Se "Permitir que apps da área de trabalho acessem
+  o microfone" estiver desligado nas configurações de privacidade, o microfone fica mudo.
+- Captura de janela usa PrintWindow: não funciona com a janela minimizada (fica o último
+  quadro) e vídeos com DRM (Netflix etc.) aparecem pretos.
 - O vídeo é codificado em software, uma vez por espectador: bom para poucos espectadores
   (~3–5). A resolução é limitada a 1080p a 20 fps.
 - O instalador não é assinado digitalmente, então o Windows SmartScreen mostra um aviso

@@ -10,6 +10,7 @@ from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QSlider, QVBoxLayout, QWidget
 
 from ..rtc import ViewerSession
+from .voice import VoiceControls
 from .widgets import button, label
 
 log = logging.getLogger(__name__)
@@ -89,6 +90,16 @@ class ViewerPage(QWidget):
         bar.addStretch()
         bar.addWidget(label(f"Sala <b>{code}</b>", "muted"))
         bar.addStretch()
+        self.voice = VoiceControls(code)
+        bar.addWidget(self.voice)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet("color: #2a3140;")
+        bar.addSpacing(8)
+        bar.addWidget(sep)
+        bar.addSpacing(8)
+        self.stream_lbl = label("Transmissão", "hint")
+        bar.addWidget(self.stream_lbl)
 
         self.mute_btn = button("🔊", "secondary")
         self.mute_btn.setFixedWidth(44)
@@ -99,6 +110,7 @@ class ViewerPage(QWidget):
         self.volume.setRange(0, 100)
         self.volume.setValue(100)
         self.volume.setFixedWidth(120)
+        self.volume.setToolTip("Volume da transmissão")
         self.volume.valueChanged.connect(self._volume_changed)
         bar.addWidget(self.volume)
         self.no_audio = label("Sem áudio", "hint")
@@ -121,6 +133,7 @@ class ViewerPage(QWidget):
 
     async def stop(self) -> None:
         await self.session.close()
+        await self.voice.stop()
 
     def set_fullscreen_ui(self, fullscreen: bool) -> None:
         self.bar.setVisible(not fullscreen)
@@ -140,6 +153,7 @@ class ViewerPage(QWidget):
         self._has_audio = has_audio
         self.mute_btn.setVisible(has_audio)
         self.volume.setVisible(has_audio)
+        self.stream_lbl.setVisible(has_audio)
         self.no_audio.setVisible(not has_audio and self.session.status == "watching")
 
     # --- controles ---

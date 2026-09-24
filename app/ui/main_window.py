@@ -85,7 +85,7 @@ class MainWindow(QMainWindow):
         page = self.page
         if isinstance(page, (HostPage, ViewerPage)):
             try:
-                await page.stop()
+                await (page.leave() if isinstance(page, HostPage) else page.stop())
             except Exception:  # noqa: BLE001
                 log.exception("erro ao encerrar sessão")
 
