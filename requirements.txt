@@ -1,0 +1,11 @@
+aiortc==1.15.0
+av==17.1.0
+httpx==0.28.1
+mss==10.2.0
+numpy==2.5.3
+packaging==26.3
+PyAudioWPatch==0.2.12.8
+PySide6==6.11.2
+qasync==0.28.0
+realtime==2.31.0
+sounddevice==0.5.6

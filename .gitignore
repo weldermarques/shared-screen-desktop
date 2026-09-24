@@ -1,0 +1,9 @@
+.venv/
+build/
+dist/
+dist-installer/
+__pycache__/
+app/_build_config.py
+*.spec
+.env
+.env.local
